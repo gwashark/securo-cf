@@ -1,0 +1,35 @@
+CREATE TABLE IF NOT EXISTS transactions (
+  id TEXT PRIMARY KEY NOT NULL,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  category_id TEXT REFERENCES categories(id) ON DELETE SET NULL,
+  external_id TEXT,
+  description TEXT NOT NULL,
+  original_description TEXT,
+  amount REAL NOT NULL,
+  currency TEXT NOT NULL DEFAULT 'USD',
+  date TEXT NOT NULL,
+  effective_date TEXT NOT NULL,
+  type TEXT NOT NULL CHECK (type IN ('debit', 'credit')),
+  source TEXT NOT NULL DEFAULT 'manual',
+  status TEXT NOT NULL DEFAULT 'posted' CHECK (status IN ('posted', 'pending')),
+  payee TEXT,
+  payee_id TEXT,
+  notes TEXT,
+  transfer_pair_id TEXT,
+  amount_primary REAL,
+  fx_rate_used REAL,
+  installment_number INTEGER,
+  total_installments INTEGER,
+  installment_total_amount REAL,
+  installment_purchase_date TEXT,
+  effective_bill_date TEXT,
+  bill_id TEXT,
+  is_ignored INTEGER NOT NULL DEFAULT 0,
+  exclude_from_pnl INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_transactions_workspace_date ON transactions(workspace_id, date);
+CREATE INDEX IF NOT EXISTS idx_transactions_account_date ON transactions(account_id, date);

@@ -1,0 +1,55 @@
+export function getAccountName(account) {
+    return account.display_name ?? account.name;
+}
+/**
+ * Total of the accounts' primary-currency balances. Cards on one shared credit
+ * line each report the whole line's balance, so each `shared_balance_group`
+ * counts once, the same way the backend totals it.
+ */
+export function sumAccountBalances(accounts) {
+    const seenGroups = new Set();
+    return accounts.reduce((sum, a) => {
+        if (a.shared_balance_group) {
+            if (seenGroups.has(a.shared_balance_group))
+                return sum;
+            seenGroups.add(a.shared_balance_group);
+        }
+        return sum + Number(a.balance_primary ?? a.current_balance);
+    }, 0);
+}
+/**
+ * Return a presentation-only copy ordered by the name users see.
+ * The input is never mutated, which keeps React Query's cached account list intact.
+ */
+export function sortAccountsByDisplayName(accounts) {
+    return [...accounts].sort((left, right) => getAccountName(left).localeCompare(getAccountName(right), undefined, {
+        numeric: true,
+        sensitivity: 'base',
+    }));
+}
+/**
+ * The bank's identifier for an account, masked to its last 4 chars, e.g. "•••• 1234".
+ *
+ * Banks commonly report every account under the same label (often the holder's
+ * name), so this is what tells two of them apart. Null when the provider gave us
+ * no identifier, so callers render nothing rather than an empty mask. Locale-neutral
+ * by construction: dots and the bank's own digits, nothing to translate.
+ */
+export function formatAccountMask(account) {
+    return account.masked_number ? `•••• ${account.masked_number}` : null;
+}
+/**
+ * Account name with its mask appended, e.g. "Checking •••• 1234", for compact
+ * single-line surfaces such as the account <select> options, where there is no
+ * room for a secondary line. When the account has an explicit display_name, the
+ * mask is omitted since the user-chosen label already distinguishes it.
+ */
+export function getAccountLabel(account) {
+    const name = getAccountName(account);
+    // When the account has an explicit display_name the user set, it already
+    // distinguishes this account from others so the mask suffix is redundant.
+    if (account.display_name)
+        return name;
+    const mask = formatAccountMask(account);
+    return mask ? `${name} ${mask}` : name;
+}

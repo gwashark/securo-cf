@@ -1,0 +1,48 @@
+---
+export const prerender = true
+
+export function getStaticPaths() {
+  return [
+    'setup',
+    'login',
+    'auth/oidc/callback',
+    'register',
+    'transactions',
+    'accounts',
+    'import',
+    'rules',
+    'categories',
+    'collections',
+    'budgets',
+    'goals',
+    'recurring',
+    'assets',
+    'assets/import',
+    'reports',
+    'payees',
+    'groups',
+    'invoices',
+    'invoices/schedules',
+    'invoices/products',
+    'workspace/settings',
+    'admin',
+    'agents',
+    'agents/connections',
+    'oauth/callback',
+    'enable-banking',
+  ].map((path) => ({ params: { path } }))
+}
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width" />
+    <title>Securo</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/app-js/main.js"></script>
+  </body>
+</html>

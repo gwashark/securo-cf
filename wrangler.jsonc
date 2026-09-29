@@ -1,0 +1,22 @@
+{
+	"$schema": "./node_modules/wrangler/config-schema.json",
+	"compatibility_date": "2026-09-26",
+	"compatibility_flags": ["global_fetch_strictly_public"],
+	"name": "securo-cf",
+	"main": "@astrojs/cloudflare/entrypoints/server",
+	"assets": {
+		"directory": "./dist",
+		"binding": "ASSETS"
+	},
+	"d1_databases": [
+    {
+	"binding": "DB",
+      "database_name": "securo_test_db",
+	"database_id": "42c76b6b-b548-46f2-beb7-47c56b08b77d",
+	"migrations_dir": "src/db/migrations"
+    }
+  ],
+	"observability": {
+		"enabled": true
+	}
+}

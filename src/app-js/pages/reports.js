@@ -1,0 +1,609 @@
+import { jsx as _jsx, jsxs as _jsxs, Fragment as _Fragment } from "react/jsx-runtime";
+import { useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { useDisplayLocale } from '../hooks/use-display-locale.js';
+import { useQuery } from '@tanstack/react-query';
+import { AreaChart, Area, Bar, ComposedChart, Line, PieChart, Pie, Cell, XAxis, YAxis, Tooltip, Legend, ReferenceLine, ResponsiveContainer, } from 'recharts';
+import { AlertCircle, HelpCircle, X } from 'lucide-react';
+import { reports } from '../lib/api.js';
+import { extractApiError } from '../lib/api-errors.js';
+import { Skeleton } from '../components/ui/skeleton.js';
+import { Popover, PopoverTrigger, PopoverContent } from '../components/ui/popover.js';
+import { DateRangePicker } from '../components/ui/date-range-picker.js';
+import { PageHeader } from '../components/page-header.js';
+import { CashflowSankey } from '../components/reports/CashflowSankey.js';
+import { usePrivacyMode } from '../hooks/use-privacy-mode.js';
+import { useAuth } from '../contexts/auth-context.js';
+import { useCollectionFilter } from '../contexts/collection-filter-context.js';
+import { formatCurrency } from '../lib/format.js';
+import { localDateString } from '../lib/date-utils.js';
+// A small qualitative palette of well-separated hues for the composition
+// detail ring. Capped to a handful of slices, distinct colours make each
+// holding easy to match against its legend entry (which a same-hue ramp
+// across 15+ near-identical slices never could).
+const SLICE_COLORS = [
+    '#6366F1', // indigo
+    '#F59E0B', // amber
+    '#10B981', // emerald
+    '#EC4899', // pink
+    '#0EA5E9', // sky
+    '#8B5CF6', // violet
+    '#F97316', // orange
+    '#14B8A6', // teal
+    '#84CC16', // lime
+    '#D946EF', // fuchsia
+    '#F43F5E', // rose
+    '#06B6D4', // cyan
+];
+const OTHER_SLICE_COLOR = '#9CA3AF';
+function formatCompact(value, currency = 'USD', locale = 'en-US') {
+    return new Intl.NumberFormat(locale, {
+        style: 'currency',
+        currency,
+        notation: 'compact',
+        maximumFractionDigits: 1,
+    }).format(value);
+}
+const HISTORICAL_RANGE_OPTIONS = [
+    { key: '6m', months: 6 },
+    { key: 'ytd', months: 12, period: 'ytd' },
+    { key: '1y', months: 12 },
+    { key: '2y', months: 24 },
+];
+const FORWARD_RANGE_OPTIONS = [
+    { key: '3m', months: 3 },
+    { key: '6m', months: 6 },
+    { key: '12m', months: 12 },
+];
+// The Money Map answers "where did my money go lately", so it leans on recent
+// windows (down to 30 days) and drops the 2Y trend view the other tabs keep.
+const MONEY_MAP_RANGE_OPTIONS = [
+    { key: '30d', months: 1, days: 30 },
+    { key: '3m', months: 3 },
+    { key: '6m', months: 6 },
+    { key: 'ytd', months: 12, period: 'ytd' },
+    { key: '1y', months: 12 },
+];
+const HISTORICAL_INTERVAL_OPTIONS = [
+    { key: 'daily', value: 'daily' },
+    { key: 'weekly', value: 'weekly' },
+    { key: 'monthly', value: 'monthly' },
+    { key: 'yearly', value: 'yearly' },
+];
+const CASH_FLOW_INTERVAL_OPTIONS = [
+    { key: 'daily', value: 'daily' },
+    { key: 'weekly', value: 'weekly' },
+    { key: 'monthly', value: 'monthly' },
+];
+const INTERVAL_LABELS = {
+    daily: 'intervalDaily',
+    weekly: 'intervalWeekly',
+    monthly: 'intervalMonthly',
+    yearly: 'intervalYearly',
+};
+const RANGE_LABELS = {
+    '30d': 'range30d',
+    '3m': 'range3m',
+    '6m': 'range6m',
+    '1y': 'range1y',
+    ytd: 'rangeYtd',
+    '12m': 'range12m',
+    '2y': 'range2y',
+    custom: 'customRange',
+};
+// Sentinel key for the "custom range" preset. Kept out of the preset arrays
+// above so we can decide per-tab whether it's actually offered (cash flow,
+// which is a forecast, still uses forward-only presets).
+const CUSTOM_RANGE_KEY = 'custom';
+// Mirrors the backend's `_MAX_CUSTOM_RANGE_YEARS` (backend/app/api/reports.py)
+// so a too-wide pick is rejected in the picker instead of round-tripping to
+// the API for the same 422. A calendar-year anniversary, not a fixed day
+// count, so leap days inside the window can't push the cap past 10 years.
+const CUSTOM_RANGE_MAX_YEARS = 10;
+// Seed a historical draft from January 1 through today; Apply commits it.
+function defaultCustomRange() {
+    const today = new Date();
+    return { from: `${today.getFullYear()}-01-01`, to: localDateString(today) };
+}
+const REPORT_TABS = [
+    {
+        key: 'net_worth', labelKey: 'reports.netWorth', enabled: true,
+        rangeOptions: HISTORICAL_RANGE_OPTIONS, intervalOptions: HISTORICAL_INTERVAL_OPTIONS,
+        supportsCustomRange: true, fallbackRangeKey: '1y', fallbackInterval: 'monthly',
+    },
+    {
+        key: 'income_expenses', labelKey: 'reports.incomeExpenses', enabled: true,
+        rangeOptions: HISTORICAL_RANGE_OPTIONS, intervalOptions: HISTORICAL_INTERVAL_OPTIONS,
+        supportsCustomRange: true, fallbackRangeKey: '1y', fallbackInterval: 'monthly',
+    },
+    {
+        key: 'cash_flow', labelKey: 'reports.cashFlow', enabled: true,
+        rangeOptions: FORWARD_RANGE_OPTIONS, intervalOptions: CASH_FLOW_INTERVAL_OPTIONS,
+        supportsCustomRange: false, fallbackRangeKey: '6m', fallbackInterval: 'daily',
+    },
+    {
+        key: 'money_map', labelKey: 'reports.moneyMap', enabled: true,
+        rangeOptions: MONEY_MAP_RANGE_OPTIONS, intervalOptions: HISTORICAL_INTERVAL_OPTIONS,
+        supportsCustomRange: true, fallbackRangeKey: '3m', fallbackInterval: 'monthly',
+    },
+];
+export default function ReportsPage() {
+    const { t } = useTranslation();
+    const { mask, privacyMode, MASK } = usePrivacyMode();
+    const { user } = useAuth();
+    const userCurrency = user?.preferences?.currency_display ?? 'USD';
+    const locale = useDisplayLocale();
+    const customDefaults = defaultCustomRange();
+    const [rangeKey, setRangeKey] = useState('1y');
+    const [interval, setInterval] = useState('monthly');
+    // Custom range endpoints (YYYY-MM-DD) — populated when the user opens the
+    // Custom preset and confirms a date range. Preserved across tab switches
+    // that still support custom ranges so the picker doesn't forget its
+    // selection while the user compares views.
+    const [customFrom, setCustomFrom] = useState('');
+    const [customTo, setCustomTo] = useState('');
+    const [activeTab, setActiveTab] = useState('net_worth');
+    const [compositionView, setCompositionView] = useState('netWorth');
+    const [sparklineView, setSparklineView] = useState('byExpenses');
+    const [sparklinePage, setSparklinePage] = useState(0);
+    const [cashFlowBaseline, setCashFlowBaseline] = useState(false);
+    const [selectedDate, setSelectedDate] = useState(null);
+    // Active Collection filter (issue #105): scope all report tabs to its
+    // accounts; net worth also includes the collection's wallets' assets.
+    const { activeAccountIds, activeWalletIds } = useCollectionFilter();
+    const acctIds = activeAccountIds ?? undefined;
+    const walletIds = activeWalletIds ?? undefined;
+    // Wallet-only collection (active, zero accounts): the account-based reports
+    // (income/expenses, cash flow) have no data — only net worth (which includes
+    // the wallets' assets) is meaningful.
+    const noAccounts = activeAccountIds !== null && activeAccountIds.length === 0;
+    const currentTab = REPORT_TABS.find((tab) => tab.key === activeTab) ?? REPORT_TABS[0];
+    const isCashFlow = activeTab === 'cash_flow';
+    // The Money Map (Sankey) tab is driven by the same income/expenses
+    // composition, aggregated over the selected historical range.
+    const isMoneyMap = activeTab === 'money_map';
+    const rangeOptions = currentTab.rangeOptions;
+    // Cash flow's forecast presets don't make sense with a past-only calendar
+    // range, so custom is only offered for the historical tabs (Net Worth,
+    // Income vs Expenses, Money Map).
+    const supportsCustomRange = currentTab.supportsCustomRange;
+    const intervalOptions = currentTab.intervalOptions;
+    const isCustomRange = supportsCustomRange && rangeKey === CUSTOM_RANGE_KEY;
+    const hasCustomRange = isCustomRange && !!customFrom && !!customTo;
+    const selectedRange = rangeOptions.find((r) => r.key === rangeKey) ?? rangeOptions[0];
+    // In custom mode, translate the picked span into an equivalent `months`
+    // value so downstream logic (interval bucketing, forecast fan-out) keeps
+    // working. Backend uses start_date/end_date directly when they're set.
+    const customMonths = hasCustomRange
+        ? Math.max(1, Math.min(24, Math.ceil((new Date(customTo + 'T00:00:00').getTime() -
+            new Date(customFrom + 'T00:00:00').getTime()) /
+            (1000 * 60 * 60 * 24 * 30))))
+        : selectedRange.months;
+    const months = isCustomRange ? customMonths : selectedRange.months;
+    const period = isCustomRange ? undefined : selectedRange.period;
+    const days = isCustomRange ? undefined : selectedRange.days;
+    const apiStart = hasCustomRange ? customFrom : undefined;
+    const apiEnd = hasCustomRange ? customTo : undefined;
+    const handleSelectTab = (key) => {
+        const nextTab = REPORT_TABS.find((tab) => tab.key === key) ?? REPORT_TABS[0];
+        setActiveTab(key);
+        setCompositionView(key === 'net_worth' ? 'netWorth' : 'net');
+        setSparklinePage(0);
+        setSelectedDate(null);
+        // Clamp the range/interval preset to what the new tab supports.
+        const stillValid = (rangeKey === CUSTOM_RANGE_KEY && nextTab.supportsCustomRange) ||
+            nextTab.rangeOptions.some((r) => r.key === rangeKey);
+        if (!stillValid) {
+            setRangeKey(nextTab.fallbackRangeKey);
+        }
+        if (!nextTab.intervalOptions.some((i) => i.value === interval)) {
+            setInterval(nextTab.fallbackInterval);
+        }
+    };
+    const { data, isLoading, isError, error, refetch } = useQuery({
+        queryKey: ['reports', activeTab, rangeKey, months, period ?? null, days ?? null, interval, isCashFlow ? cashFlowBaseline : false, activeAccountIds, activeWalletIds, apiStart ?? null, apiEnd ?? null],
+        queryFn: () => isCashFlow
+            ? reports.cashFlow(months, interval, cashFlowBaseline, acctIds)
+            : activeTab === 'income_expenses' || isMoneyMap
+                ? reports.incomeExpenses(months, interval, acctIds, period, days, apiStart, apiEnd)
+                : reports.netWorth(months, interval, acctIds, walletIds, period, apiStart, apiEnd),
+        // Only request a custom report with both committed endpoints.
+        enabled: currentTab.enabled && !(noAccounts && activeTab !== 'net_worth') && (!isCustomRange || hasCustomRange),
+    });
+    const summary = data?.summary;
+    const trend = data?.trend ?? [];
+    const meta = data?.meta;
+    // For cash flow we split the line at `forecast_start_date` so the past
+    // section renders solid and the forward projection renders dashed.
+    // The boundary point is duplicated in both series so the line visually
+    // connects without a gap.
+    const forecastStart = meta?.forecast_start_date ?? null;
+    const NEGATIVE_SERIES = new Set(['liabilities']);
+    const chartData = trend.map((dp) => {
+        const isPast = forecastStart ? dp.date < forecastStart : false;
+        const isBoundary = forecastStart ? dp.date === forecastStart : false;
+        const breakdowns = meta?.type === 'net_worth'
+            ? Object.fromEntries(Object.entries(dp.breakdowns).map(([k, v]) => [k, NEGATIVE_SERIES.has(k) ? -v : v]))
+            : dp.breakdowns;
+        return {
+            date: dp.date,
+            value: dp.value,
+            change: dp.change ?? null,
+            valuePast: isPast || isBoundary ? dp.value : null,
+            valueForecast: !isPast ? dp.value : null,
+            ...breakdowns,
+        };
+    });
+    const allBreakdowns = summary?.breakdowns ?? [];
+    const breakdownData = allBreakdowns.filter((b) => b.value > 0);
+    const colorMap = {};
+    for (const b of allBreakdowns) {
+        colorMap[b.key] = b.color;
+    }
+    const snapshotTrendPoint = selectedDate
+        ? (trend.find((dp) => dp.date === selectedDate) ?? null)
+        : null;
+    const isHistoricalSnapshot = snapshotTrendPoint !== null &&
+        selectedDate !== trend[trend.length - 1]?.date;
+    const snapshotBreakdownData = snapshotTrendPoint
+        ? Object.entries(snapshotTrendPoint.breakdowns)
+            .map(([key, rawValue]) => {
+            const orig = allBreakdowns.find((b) => b.key === key);
+            return {
+                key,
+                label: orig?.label ?? key,
+                value: Math.abs(rawValue),
+                color: orig?.color ?? '#6366F1',
+            };
+        })
+            .filter((b) => b.value > 0)
+        : null;
+    const compositionBreakdownData = snapshotBreakdownData ?? breakdownData;
+    const changePrefix = (summary?.change_amount ?? 0) >= 0 ? '+' : '';
+    const changeColor = (summary?.change_amount ?? 0) >= 0 ? 'text-emerald-600' : 'text-rose-500';
+    const tooltipStyle = {
+        background: 'var(--card)',
+        color: 'var(--foreground)',
+        border: '1px solid var(--border)',
+        borderRadius: '0.75rem',
+        boxShadow: '0 4px 12px rgba(0,0,0,0.08)',
+        fontSize: '12px',
+    };
+    const composition = data?.composition ?? [];
+    // Composition toggle options per report type
+    const compositionOptions = activeTab === 'net_worth'
+        ? ['netWorth', 'assetsAndAccounts', 'liabilities']
+        : activeTab === 'income_expenses' || activeTab === 'cash_flow'
+            ? ['net', 'byIncome', 'byExpenses']
+            : ['summary', 'detailed'];
+    // Which breakdown groups are visible in each toggle state. null = show all.
+    const activeCompositionGroups = (() => {
+        if (compositionView === 'assetsAndAccounts')
+            return new Set(['accounts', 'assets']);
+        if (compositionView === 'liabilities')
+            return new Set(['liabilities']);
+        if (compositionView === 'byIncome')
+            return new Set(['income']);
+        if (compositionView === 'byExpenses')
+            return new Set(['expenses']);
+        return null;
+    })();
+    // Normalize a breakdown key to its composition group. Cash flow exposes its
+    // income/expense breakdowns under projected* keys, but composition items are
+    // tagged with the plain group, so the two must be reconciled to line up.
+    const groupOf = (key) => key === 'projectedIncome' ? 'income'
+        : key === 'projectedExpenses' ? 'expenses'
+            : key;
+    // Inner ring — summary view (high-level breakdown), filtered by toggle state for net_worth
+    const innerDonutData = (() => {
+        const excludedKeys = new Set(['netIncome', 'startingBalance', 'endingBalance']);
+        return compositionBreakdownData
+            .filter((b) => !excludedKeys.has(b.key) && (!activeCompositionGroups || activeCompositionGroups.has(groupOf(b.key))))
+            .map((b) => ({
+            name: t(`reports.${b.key}`, { defaultValue: b.label }),
+            value: b.value,
+            color: b.color,
+        }));
+    })();
+    const activeComposition = snapshotTrendPoint?.composition ?? composition;
+    // Build a stable key → color map from the full composition range (never the
+    // snapshot), sorted the same way compositionDetail sorts, so colors don't
+    // shift when switching between dates.
+    const netWorthColorMap = (() => {
+        const excludedKeys = new Set(['netIncome', 'startingBalance', 'endingBalance']);
+        const groupOrder = breakdownData
+            .filter((b) => !excludedKeys.has(b.key) && (!activeCompositionGroups || activeCompositionGroups.has(groupOf(b.key))))
+            .map((b) => groupOf(b.key));
+        const activeGroups = new Set(groupOrder);
+        const sorted = [...composition]
+            .filter((c) => activeGroups.has(c.group))
+            .sort((a, b) => {
+            const ga = groupOrder.indexOf(a.group);
+            const gb = groupOrder.indexOf(b.group);
+            if (ga !== gb)
+                return ga - gb;
+            return b.value - a.value;
+        });
+        const map = new Map();
+        sorted.forEach((c, i) => map.set(c.key, SLICE_COLORS[i % SLICE_COLORS.length]));
+        return map;
+    })();
+    // Full detail — every holding in the active group(s), largest first, labelled
+    // and coloured. The donut draws only the top slice of this; the legend popover
+    // lists all of it. Net worth items get a distinct palette (the long tail falls
+    // back to the neutral colour); income/expense items keep the user's category colour.
+    const compositionDetail = (() => {
+        if (activeComposition.length === 0)
+            return [];
+        const excludedKeys = new Set(['netIncome', 'startingBalance', 'endingBalance']);
+        const activeGroups = new Set(compositionBreakdownData
+            .filter((b) => !excludedKeys.has(b.key) && (!activeCompositionGroups || activeCompositionGroups.has(groupOf(b.key))))
+            .map((b) => groupOf(b.key)));
+        const itemLabel = (c) => {
+            if (c.key === 'uncategorized') {
+                // Uncategorized income and uncategorized expenses are distinct buckets
+                // that share a label — qualify them by group so they don't look duplicated.
+                const g = c.group === 'income' ? t('reports.income')
+                    : c.group === 'expenses' ? t('reports.expenses')
+                        : null;
+                return g ? `${t('reports.uncategorized')} · ${g}` : t('reports.uncategorized');
+            }
+            if (c.key === 'baseline')
+                return t('reports.baseline');
+            return c.label;
+        };
+        const groupOrder = compositionBreakdownData
+            .filter((b) => !excludedKeys.has(b.key) && (!activeCompositionGroups || activeCompositionGroups.has(groupOf(b.key))))
+            .map((b) => groupOf(b.key));
+        return activeComposition
+            .filter((c) => activeGroups.has(c.group))
+            .sort((a, b) => {
+            const ga = groupOrder.indexOf(a.group);
+            const gb = groupOrder.indexOf(b.group);
+            if (ga !== gb)
+                return ga - gb;
+            return b.value - a.value;
+        })
+            .map((c) => ({
+            name: itemLabel(c),
+            value: c.value,
+            color: activeTab === 'net_worth' ? (netWorthColorMap.get(c.key) ?? OTHER_SLICE_COLOR) : c.color,
+            group: c.group,
+        }));
+    })();
+    // Outer ring — items above 3 % of total get their own slice; everything else
+    // per group folds into one "Other <Group>" slice. Outer arcs are anchored to
+    // inner ring values so per-item rounding never misaligns the two rings.
+    const outerDonutData = (() => {
+        if (compositionDetail.length === 0)
+            return [];
+        const excludedKeys = new Set(['netIncome', 'startingBalance', 'endingBalance']);
+        const innerGroups = [
+            ...new Set(compositionBreakdownData
+                .filter((b) => !excludedKeys.has(b.key) && (!activeCompositionGroups || activeCompositionGroups.has(groupOf(b.key))))
+                .map((b) => groupOf(b.key))),
+        ];
+        const innerGroupValue = new Map();
+        for (const b of compositionBreakdownData) {
+            if (!excludedKeys.has(b.key) && (!activeCompositionGroups || activeCompositionGroups.has(groupOf(b.key)))) {
+                const g = groupOf(b.key);
+                innerGroupValue.set(g, (innerGroupValue.get(g) ?? 0) + b.value);
+            }
+        }
+        const totalValue = [...innerGroupValue.values()].reduce((s, v) => s + v, 0);
+        const otherLabel = (g) => g === 'accounts' ? t('reports.otherAccounts')
+            : g === 'assets' ? t('reports.otherAssets')
+                : g === 'liabilities' ? t('reports.otherLiabilities')
+                    : g === 'income' ? t('reports.otherIncome')
+                        : g === 'expenses' ? t('reports.otherExpenses')
+                            : t('reports.other');
+        const byGroup = new Map();
+        for (const g of innerGroups)
+            byGroup.set(g, []);
+        for (const item of compositionDetail)
+            byGroup.get(item.group)?.push(item);
+        const result = [];
+        for (const g of innerGroups) {
+            const all = byGroup.get(g) ?? [];
+            const significant = all.filter((item) => totalValue > 0 && item.value / totalValue >= 0.03);
+            const rest = all.filter((item) => totalValue <= 0 || item.value / totalValue < 0.03);
+            const topSum = significant.reduce((s, d) => s + d.value, 0);
+            const innerTotal = innerGroupValue.get(g) ?? topSum;
+            const otherValue = Math.round((innerTotal - topSum) * 100) / 100;
+            for (const item of significant)
+                result.push(item);
+            if (otherValue > 0.005) {
+                if (rest.length === 1) {
+                    result.push(rest[0]);
+                }
+                else {
+                    result.push({
+                        name: otherLabel(g),
+                        value: otherValue,
+                        color: OTHER_SLICE_COLOR,
+                        children: rest.length > 0 ? rest : undefined,
+                    });
+                }
+            }
+        }
+        return result;
+    })();
+    return (_jsxs("div", { children: [_jsx(PageHeader, { section: t('reports.section'), title: t(currentTab.labelKey), action: _jsxs("div", { className: "flex items-center gap-2", children: [isCashFlow && (_jsxs("div", { className: `flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs font-semibold transition-colors ${cashFlowBaseline
+                                ? 'border-primary/40 bg-primary/10 text-primary'
+                                : 'border-border bg-card text-muted-foreground'}`, children: [_jsxs("button", { type: "button", onClick: () => setCashFlowBaseline((v) => !v), className: "flex items-center gap-2 hover:text-foreground transition-colors", "aria-pressed": cashFlowBaseline, children: [_jsx("span", { className: `relative inline-flex h-3.5 w-6 shrink-0 items-center rounded-full transition-colors ${cashFlowBaseline ? 'bg-primary' : 'bg-muted'}`, children: _jsx("span", { className: `inline-block h-2.5 w-2.5 transform rounded-full bg-white transition-transform ${cashFlowBaseline ? 'translate-x-3' : 'translate-x-0.5'}` }) }), t('reports.includeEstimate')] }), _jsx("span", { title: t('reports.includeEstimateHelp'), "aria-label": t('reports.includeEstimateHelp'), className: "inline-flex cursor-help", children: _jsx(HelpCircle, { className: "h-3.5 w-3.5 opacity-60" }) })] })), _jsxs("div", { className: "flex items-center rounded-lg border border-border bg-card overflow-hidden", children: [rangeOptions.map((opt) => (_jsx("button", { onClick: () => { setRangeKey(opt.key); setSelectedDate(null); }, className: `px-3 py-1.5 text-xs font-semibold transition-colors ${rangeKey === opt.key
+                                        ? 'bg-primary text-primary-foreground'
+                                        : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'}`, children: t(`reports.${RANGE_LABELS[opt.key]}`) }, opt.key))), supportsCustomRange && (_jsx(DateRangePicker, { variant: "segment", active: isCustomRange, from: customFrom, to: customTo, defaultFrom: customDefaults.from, defaultTo: customDefaults.to, disallowFuture: true, maxRangeYears: CUSTOM_RANGE_MAX_YEARS, onChange: (f, to) => {
+                                        setCustomFrom(f);
+                                        setCustomTo(to);
+                                        setRangeKey(f && to ? CUSTOM_RANGE_KEY : currentTab.fallbackRangeKey);
+                                        setSelectedDate(null);
+                                    }, label: t('reports.customRange'), placeholder: t('reports.pickCustomRange') }))] }), _jsx("div", { className: `flex items-center rounded-lg border border-border bg-card overflow-hidden ${isMoneyMap ? 'hidden' : ''}`, children: intervalOptions.map((opt) => (_jsx("button", { onClick: () => { setInterval(opt.value); setSelectedDate(null); }, className: `px-2.5 py-1.5 text-xs font-semibold transition-colors ${interval === opt.value
+                                    ? 'bg-primary text-primary-foreground'
+                                    : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'}`, children: t(`reports.${INTERVAL_LABELS[opt.key]}`) }, opt.key))) })] }) }), _jsx("div", { className: "flex items-center gap-1 mb-5 border-b border-border", children: REPORT_TABS.map((tab) => (_jsxs("button", { onClick: () => { if (tab.enabled)
+                        handleSelectTab(tab.key); }, disabled: !tab.enabled, className: `relative px-4 py-2.5 text-sm font-medium transition-colors ${activeTab === tab.key
+                        ? 'text-foreground'
+                        : tab.enabled
+                            ? 'text-muted-foreground hover:text-foreground'
+                            : 'text-muted-foreground/50 cursor-not-allowed'}`, children: [t(tab.labelKey), !tab.enabled && (_jsx("span", { className: "ml-1.5 text-[10px] text-muted-foreground/50", children: t('reports.comingSoon') })), activeTab === tab.key && (_jsx("span", { className: "absolute bottom-0 left-0 right-0 h-0.5 bg-primary rounded-full" }))] }, tab.key))) }), isError && (_jsxs("div", { className: "flex items-center justify-between gap-3 bg-rose-50 dark:bg-rose-500/10 border border-rose-200 dark:border-rose-500/30 rounded-lg px-4 py-2.5 mb-5", children: [_jsxs("div", { className: "flex items-center gap-2.5 min-w-0", children: [_jsx(AlertCircle, { size: 16, className: "shrink-0 text-rose-600 dark:text-rose-400" }), _jsx("span", { className: "text-sm text-rose-900 dark:text-rose-200 truncate", children: extractApiError(error, t('reports.loadError')) })] }), _jsx("button", { type: "button", onClick: () => refetch(), className: "shrink-0 text-sm font-semibold text-rose-600 dark:text-rose-400 hover:underline", children: t('common.retry') })] })), !isError && (_jsxs(_Fragment, { children: [_jsx("div", { className: "bg-card rounded-xl border border-border shadow-sm mb-5", children: _jsx("div", { className: "px-5 py-4", children: isLoading ? (_jsxs("div", { className: "flex items-center gap-8", children: [_jsx(Skeleton, { className: "h-16 w-48" }), _jsxs("div", { className: "flex gap-6", children: [_jsx(Skeleton, { className: "h-12 w-28" }), _jsx(Skeleton, { className: "h-12 w-28" }), _jsx(Skeleton, { className: "h-12 w-28" })] })] })) : (_jsxs("div", { className: "flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4", children: [_jsxs("div", { children: [_jsx("p", { className: "text-xs font-medium text-muted-foreground mb-0.5 uppercase tracking-wider", children: t(currentTab.labelKey) }), _jsxs("div", { className: "flex items-baseline gap-3", children: [_jsx("p", { className: "text-3xl font-bold tabular-nums text-foreground", children: mask(formatCurrency(summary?.primary_value ?? 0, userCurrency, locale)) }), summary?.change_percent !== null && summary?.change_percent !== undefined && (_jsxs("span", { className: `text-sm font-semibold tabular-nums ${changeColor}`, children: [changePrefix, summary.change_percent.toFixed(1), "%"] }))] }), _jsxs("p", { className: "text-xs text-muted-foreground mt-0.5", children: [mask(`${changePrefix}${formatCurrency(summary?.change_amount ?? 0, userCurrency, locale)}`), ' ', t(meta?.type === 'cash_flow' ? 'reports.vsToday' : 'reports.vsStart')] })] }), _jsx("div", { className: "flex flex-wrap gap-6", children: breakdownData.map((b) => (_jsxs("div", { className: "min-w-0", children: [_jsxs("div", { className: "flex items-center gap-1.5 mb-0.5", children: [_jsx("div", { className: "w-2.5 h-2.5 rounded-full shrink-0", style: { backgroundColor: b.color } }), _jsx("p", { className: "text-xs font-medium text-muted-foreground", children: t(`reports.${b.key}`, { defaultValue: b.label }) })] }), _jsx("p", { className: "text-lg font-bold tabular-nums text-foreground", children: mask(formatCurrency(b.value, userCurrency, locale)) })] }, b.key))) })] })) }) }), isMoneyMap && (_jsxs("div", { className: "bg-card rounded-xl border border-border shadow-sm mb-5", children: [_jsxs("div", { className: "px-5 pt-5 pb-2 flex items-center justify-between", children: [_jsx("p", { className: "text-sm font-semibold text-foreground", children: t('reports.moneyMap') }), _jsxs("div", { className: "flex items-center gap-3", children: [_jsxs("div", { className: "flex items-center gap-1.5", children: [_jsx("div", { className: "w-2 h-2 rounded-full", style: { backgroundColor: '#10B981' } }), _jsx("span", { className: "text-[11px] text-muted-foreground", children: t('reports.income') })] }), _jsxs("div", { className: "flex items-center gap-1.5", children: [_jsx("div", { className: "w-2 h-2 rounded-full", style: { backgroundColor: '#F43F5E' } }), _jsx("span", { className: "text-[11px] text-muted-foreground", children: t('reports.expenses') })] }), _jsxs("div", { className: "flex items-center gap-1.5", children: [_jsx("div", { className: "w-2 h-2 rounded-full", style: { backgroundColor: '#0EA5E9' } }), _jsx("span", { className: "text-[11px] text-muted-foreground", children: t('reports.investments') })] }), _jsxs("div", { className: "flex items-center gap-1.5", children: [_jsx("div", { className: "w-2 h-2 rounded-full", style: { backgroundColor: '#F59E0B' } }), _jsx("span", { className: "text-[11px] text-muted-foreground", children: t('reports.deficit') })] })] })] }), _jsx("div", { className: "px-3 pb-5", children: isLoading ? (_jsx("div", { className: "px-2", children: _jsx(Skeleton, { className: "h-[360px] w-full" }) })) : (_jsx(CashflowSankey, { composition: composition, currency: userCurrency, locale: locale })) })] })), !isMoneyMap && (_jsxs(_Fragment, { children: [_jsxs("div", { className: "bg-card rounded-xl border border-border shadow-sm mb-5", children: [_jsxs("div", { className: "px-5 pt-5 pb-2 flex items-center justify-between", children: [_jsxs("p", { className: "text-sm font-semibold text-foreground", children: [t(currentTab.labelKey), " \u00B7 ", t('reports.trend')] }), meta && (_jsxs("div", { className: "flex items-center gap-3", children: [meta.type === 'net_worth' ? (_jsxs("div", { className: "flex items-center gap-1.5", children: [_jsx("div", { className: "w-2 h-2 rounded-full", style: { backgroundColor: '#6366F1' } }), _jsx("span", { className: "text-[11px] text-muted-foreground", children: t('reports.netWorth') })] })) : (meta.series_keys.map((key) => (_jsxs("div", { className: "flex items-center gap-1.5", children: [_jsx("div", { className: "w-2 h-2 rounded-full", style: { backgroundColor: colorMap[key] || '#6366F1' } }), _jsx("span", { className: "text-[11px] text-muted-foreground", children: t(`reports.${key}`, { defaultValue: key }) })] }, key)))), meta.type === 'income_expenses' && (_jsxs("div", { className: "flex items-center gap-1.5", children: [_jsx("div", { className: "w-3 h-0 border-t-2 border-dashed", style: { borderColor: '#6366F1' } }), _jsx("span", { className: "text-[11px] text-muted-foreground", children: t('reports.netIncome') })] })), meta.type === 'cash_flow' && (_jsxs("div", { className: "flex items-center gap-1.5", children: [_jsx("div", { className: "w-3 h-0 border-t-2 border-dashed", style: { borderColor: '#6366F1' } }), _jsx("span", { className: "text-[11px] text-muted-foreground", children: meta.baseline_active ? t('reports.forecastBaseline') : t('reports.forecast') })] }))] }))] }), _jsx("div", { className: "px-1 pb-4", style: { height: 320 }, children: isLoading ? (_jsx("div", { className: "px-4", children: _jsx(Skeleton, { className: "h-full w-full" }) })) : chartData.length > 0 ? (meta?.type === 'cash_flow' ? (() => {
+                                            const startingBalance = summary?.breakdowns.find((b) => b.key === 'startingBalance')?.value ?? 0;
+                                            return (_jsx(ResponsiveContainer, { width: "100%", height: "100%", children: _jsxs(AreaChart, { data: chartData, margin: { top: 8, right: 16, left: 0, bottom: 0 }, children: [_jsx("defs", { children: _jsxs("linearGradient", { id: "cashFlowGrad", x1: "0", y1: "0", x2: "0", y2: "1", children: [_jsx("stop", { offset: "5%", stopColor: "#6366F1", stopOpacity: 0.2 }), _jsx("stop", { offset: "95%", stopColor: "#6366F1", stopOpacity: 0.02 })] }) }), _jsx(XAxis, { dataKey: "date", tick: { fontSize: 10, fill: 'var(--muted-foreground)' }, axisLine: false, tickLine: false, interval: "preserveStartEnd" }), _jsx(YAxis, { tickFormatter: (v) => {
+                                                                if (privacyMode)
+                                                                    return '';
+                                                                if (v === 0)
+                                                                    return '0';
+                                                                return formatCompact(v, userCurrency, locale);
+                                                            }, tick: { fontSize: 10, fill: 'var(--muted-foreground)' }, axisLine: false, tickLine: false, width: 64, tickCount: 5 }), _jsx(Tooltip, { content: ({ active, payload, label }) => {
+                                                                if (!active || !payload || payload.length === 0)
+                                                                    return null;
+                                                                const point = payload[0].payload;
+                                                                const balance = point.value ?? 0;
+                                                                const inflow = point.inflow ?? 0;
+                                                                const outflow = point.outflow ?? 0;
+                                                                return (_jsxs("div", { style: tooltipStyle, className: "px-3 py-2", children: [_jsx("p", { className: "text-xs font-medium mb-1", children: label }), _jsxs("p", { className: "text-xs", style: { color: '#6366F1' }, children: [t('reports.balance', { defaultValue: 'Balance' }), ":", ' ', privacyMode ? MASK : formatCurrency(balance, userCurrency, locale)] }), inflow > 0 && (_jsxs("p", { className: "text-xs", style: { color: '#10B981' }, children: [t('reports.inflow'), ":", ' ', privacyMode ? MASK : `+${formatCurrency(inflow, userCurrency, locale)}`] })), outflow > 0 && (_jsxs("p", { className: "text-xs", style: { color: '#F43F5E' }, children: [t('reports.outflow'), ":", ' ', privacyMode ? MASK : `-${formatCurrency(outflow, userCurrency, locale)}`] }))] }));
+                                                            } }), _jsx(ReferenceLine, { y: startingBalance, stroke: "var(--muted-foreground)", strokeDasharray: "4 4", strokeOpacity: 0.5 }), forecastStart && (_jsx(ReferenceLine, { x: forecastStart, stroke: "var(--muted-foreground)", strokeDasharray: "3 3", strokeOpacity: 0.6, label: {
+                                                                value: t('reports.today'),
+                                                                position: 'insideTopRight',
+                                                                fill: 'var(--muted-foreground)',
+                                                                fontSize: 10,
+                                                            } })), _jsx(Area, { type: "monotone", dataKey: "valuePast", stroke: "#6366F1", strokeWidth: 2.5, fill: "url(#cashFlowGrad)", dot: false, activeDot: { r: 4, fill: '#6366F1' }, isAnimationActive: false, connectNulls: false }), _jsx(Area, { type: "monotone", dataKey: "valueForecast", stroke: "#6366F1", strokeWidth: 2.5, strokeDasharray: "6 3", fill: "url(#cashFlowGrad)", fillOpacity: 0.4, dot: false, activeDot: { r: 4, fill: '#6366F1' } })] }) }));
+                                        })() : meta?.type === 'income_expenses' ? (_jsx(ResponsiveContainer, { width: "100%", height: "100%", children: _jsxs(ComposedChart, { data: chartData, margin: { top: 8, right: 16, left: 0, bottom: 0 }, children: [_jsx(XAxis, { dataKey: "date", tick: { fontSize: 10, fill: 'var(--muted-foreground)' }, axisLine: false, tickLine: false, interval: "preserveStartEnd" }), _jsx(YAxis, { tickFormatter: (v) => {
+                                                            if (privacyMode)
+                                                                return '';
+                                                            if (v === 0)
+                                                                return '0';
+                                                            return formatCompact(v, userCurrency, locale);
+                                                        }, tick: { fontSize: 10, fill: 'var(--muted-foreground)' }, axisLine: false, tickLine: false, width: 64, tickCount: 5 }), _jsx(Tooltip, { formatter: (value, name) => [
+                                                            privacyMode ? MASK : formatCurrency(value ?? 0, userCurrency, locale),
+                                                            name === 'value'
+                                                                ? t('reports.netIncome')
+                                                                : t(`reports.${name ?? ''}`, { defaultValue: name ?? '' }),
+                                                        ], labelFormatter: (label) => label, contentStyle: tooltipStyle }), _jsx(ReferenceLine, { y: 0, stroke: "var(--border)", strokeDasharray: "3 3" }), _jsx(Bar, { dataKey: "income", fill: "#10B981", radius: [4, 4, 0, 0], maxBarSize: 20 }), _jsx(Bar, { dataKey: "expenses", fill: "#F43F5E", radius: [4, 4, 0, 0], maxBarSize: 20 }), _jsx(Bar, { dataKey: "projectedIncome", fill: "#34D399", radius: [4, 4, 0, 0], maxBarSize: 20, fillOpacity: 0.65 }), _jsx(Bar, { dataKey: "projectedExpenses", fill: "#FB7185", radius: [4, 4, 0, 0], maxBarSize: 20, fillOpacity: 0.65 }), _jsx(Line, { type: "monotone", dataKey: "value", stroke: "#6366F1", strokeWidth: 2, strokeDasharray: "6 3", dot: false, activeDot: { r: 4, fill: '#6366F1' } })] }) })) : (_jsx(ResponsiveContainer, { width: "100%", height: "100%", children: _jsxs(AreaChart, { data: chartData, margin: { top: 8, right: 16, left: 0, bottom: 0 }, children: [_jsx("defs", { children: _jsxs("linearGradient", { id: "netWorthGrad", x1: "0", y1: "0", x2: "0", y2: "1", children: [_jsx("stop", { offset: "5%", stopColor: "#6366F1", stopOpacity: 0.2 }), _jsx("stop", { offset: "95%", stopColor: "#6366F1", stopOpacity: 0.02 })] }) }), _jsx(XAxis, { dataKey: "date", tick: { fontSize: 10, fill: 'var(--muted-foreground)' }, axisLine: false, tickLine: false, interval: "preserveStartEnd" }), _jsx(YAxis, { tickFormatter: (v) => {
+                                                            if (privacyMode)
+                                                                return '';
+                                                            if (v === 0)
+                                                                return '0';
+                                                            return formatCompact(v, userCurrency, locale);
+                                                        }, tick: { fontSize: 10, fill: 'var(--muted-foreground)' }, axisLine: false, tickLine: false, width: 64, tickCount: 5 }), _jsx(Tooltip, { content: ({ active, payload, label }) => {
+                                                            if (!active || !payload || payload.length === 0)
+                                                                return null;
+                                                            const point = payload[0]?.payload;
+                                                            const value = payload[0]?.value ?? 0;
+                                                            const change = point.change ?? null;
+                                                            const changeSign = change !== null && change >= 0 ? '+' : '';
+                                                            const changeColor = change !== null ? (change >= 0 ? '#10B981' : '#F43F5E') : '';
+                                                            return (_jsxs("div", { style: tooltipStyle, className: "px-3 py-2", children: [_jsx("p", { className: "text-xs font-medium mb-1", children: label }), _jsxs("p", { className: "text-xs", style: { color: '#6366F1' }, children: [t(currentTab.labelKey), ":", ' ', privacyMode ? MASK : formatCurrency(value, userCurrency, locale)] }), change !== null && (_jsxs("p", { className: "text-xs", style: { color: changeColor }, children: [t('reports.change'), ":", ' ', privacyMode ? MASK : `${changeSign}${formatCurrency(change, userCurrency, locale)}`] }))] }));
+                                                        } }), _jsx(Area, { type: "monotone", dataKey: "value", stroke: "#6366F1", strokeWidth: 2.5, fill: "url(#netWorthGrad)", dot: false, activeDot: { r: 4, fill: '#6366F1' } })] }) }))) : (_jsx("p", { className: "text-muted-foreground text-sm text-center py-16", children: t('reports.noData') })) })] }), _jsxs("div", { className: "grid grid-cols-1 lg:grid-cols-3 gap-5 items-start", children: [_jsxs("div", { className: `rounded-xl border shadow-sm transition-colors ${selectedDate ? 'bg-primary/5 border-primary/50' : 'bg-card border-border'}`, children: [_jsxs("div", { className: "px-5 pt-4 pb-2 flex flex-col gap-2 min-[635px]:flex-row min-[635px]:items-start min-[635px]:justify-between lg:flex-col lg:items-start xl:flex-row xl:items-start xl:justify-between", children: [_jsxs("div", { className: "flex flex-col", children: [_jsx("p", { className: "text-sm font-semibold text-foreground", children: t('reports.composition') }), selectedDate && (_jsx("span", { className: "text-xs text-primary font-medium", children: t('reports.asOf', { date: selectedDate }) }))] }), _jsx("div", { className: "flex items-stretch rounded-lg border border-border bg-muted/30 overflow-hidden w-fit", children: compositionOptions.map((opt) => (_jsx("button", { type: "button", onClick: () => setCompositionView(opt), className: `px-2 py-1 text-[11px] font-semibold text-center transition-colors ${compositionView === opt
+                                                                ? 'bg-primary text-primary-foreground'
+                                                                : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'}`, children: t(`reports.${opt}`) }, opt))) })] }), _jsx("div", { className: "px-1 pb-4", children: isLoading ? (_jsxs("div", { className: "flex flex-col items-center px-4 py-2", children: [_jsxs("div", { className: "relative", style: { width: 200, height: 200 }, children: [_jsx(Skeleton, { className: "w-full h-full rounded-full" }), _jsxs("div", { className: "absolute flex flex-col items-center justify-center gap-1 rounded-full bg-card", style: { width: 110, height: 110, top: '50%', left: '50%', transform: 'translate(-50%, -50%)' }, children: [_jsx(Skeleton, { className: "h-2 w-12" }), _jsx(Skeleton, { className: "h-4 w-16" })] })] }), _jsx("div", { className: "flex flex-wrap justify-center gap-x-3 gap-y-1.5 mt-3", children: Array.from({ length: activeTab === 'net_worth' ? 3 : 2 }).map((_, i) => (_jsxs("div", { className: "flex items-center gap-1.5", children: [_jsx(Skeleton, { className: "w-2 h-2 rounded-full shrink-0" }), _jsx(Skeleton, { className: "h-2 w-14" })] }, i))) })] })) : innerDonutData.length > 0 ? ((() => {
+                                                    const hasOuter = outerDonutData.length > 0;
+                                                    const donutTotal = innerDonutData.reduce((s, d) => s + d.value, 0);
+                                                    return (_jsxs("div", { className: "flex flex-col items-center", children: [_jsxs("div", { className: "relative", style: { width: 200, height: 200 }, children: [_jsxs(PieChart, { width: 200, height: 200, children: [_jsx(Pie, { data: innerDonutData, cx: "50%", cy: "50%", innerRadius: 55, outerRadius: hasOuter ? 63 : 85, paddingAngle: hasOuter ? 0 : 3, dataKey: "value", stroke: "var(--card)", strokeWidth: hasOuter ? 2 : 0, children: innerDonutData.map((entry, idx) => (_jsx(Cell, { fill: entry.color }, idx))) }), hasOuter && (_jsx(Pie, { data: outerDonutData, cx: "50%", cy: "50%", innerRadius: 64, outerRadius: 90, paddingAngle: 0, dataKey: "value", stroke: "var(--card)", strokeWidth: 2, children: outerDonutData.map((entry, idx) => (_jsx(Cell, { fill: entry.color }, idx))) })), _jsx(Tooltip, { content: ({ active, payload }) => {
+                                                                                    if (!active || !payload?.length)
+                                                                                        return null;
+                                                                                    const entry = payload[0];
+                                                                                    const v = entry.value ?? 0;
+                                                                                    const pct = donutTotal > 0 ? ((v / donutTotal) * 100).toFixed(1) : '0';
+                                                                                    const rawName = entry.name ?? '';
+                                                                                    const displayName = rawName.length > 50 ? rawName.slice(0, 47) + '…' : rawName;
+                                                                                    const children = entry.payload.children;
+                                                                                    return (_jsxs("div", { style: { ...tooltipStyle, padding: '8px 12px', zIndex: 10, maxWidth: 256 }, children: [_jsx("p", { className: "text-xs font-semibold mb-1", children: displayName }), _jsx("p", { className: "text-xs", children: privacyMode ? MASK : `${formatCurrency(v, userCurrency, locale)} (${pct}%)` }), children && children.length > 0 && (_jsx("div", { className: "mt-1.5 border-t border-border/50 pt-1.5 flex flex-col gap-0.5", style: { maxHeight: 180, overflowY: 'auto', paddingRight: '0.5rem' }, children: children.map((child, i) => {
+                                                                                                    const childPct = donutTotal > 0 ? ((child.value / donutTotal) * 100).toFixed(1) : '0';
+                                                                                                    return (_jsxs("div", { className: "flex items-center justify-between gap-3", children: [_jsxs("div", { className: "flex items-center gap-1.5 min-w-0", children: [_jsx("div", { className: "w-1.5 h-1.5 rounded-full shrink-0", style: { backgroundColor: child.color } }), _jsx("span", { className: "text-xs text-muted-foreground truncate", children: child.name.length > 25 ? child.name.slice(0, 22) + '…' : child.name })] }), _jsx("span", { className: "text-xs text-muted-foreground shrink-0", children: privacyMode ? MASK : `${formatCurrency(child.value, userCurrency, locale)} (${childPct}%)` })] }, i));
+                                                                                                }) }))] }));
+                                                                                }, wrapperStyle: { zIndex: 10, pointerEvents: 'auto' }, offset: 20 })] }), _jsxs("div", { className: "absolute inset-0 flex flex-col items-center justify-center pointer-events-none", style: { zIndex: 0 }, children: [_jsx("span", { className: "text-[10px] text-muted-foreground", children: compositionView === 'assetsAndAccounts'
+                                                                                    ? t(isHistoricalSnapshot ? 'reports.youOwned' : 'reports.youOwn', { defaultValue: isHistoricalSnapshot ? 'You Owned' : 'You Own' })
+                                                                                    : compositionView === 'liabilities'
+                                                                                        ? t(isHistoricalSnapshot ? 'reports.youOwed' : 'reports.youOwe', { defaultValue: isHistoricalSnapshot ? 'You Owed' : 'You Owe' })
+                                                                                        : compositionView === 'byIncome' ? t('reports.income')
+                                                                                            : compositionView === 'byExpenses' ? t('reports.expenses')
+                                                                                                : meta?.type === 'income_expenses' ? t('reports.netIncome')
+                                                                                                    : t(currentTab.labelKey) }), _jsx("span", { className: "text-base font-bold text-foreground tabular-nums", children: mask(formatCompact(snapshotTrendPoint
+                                                                                    ? compositionView === 'netWorth' || compositionView === 'net' || !compositionView
+                                                                                        ? snapshotTrendPoint.value
+                                                                                        : innerDonutData.reduce((s, d) => s + d.value, 0)
+                                                                                    : compositionView === 'netWorth' || compositionView === 'net' || !compositionView
+                                                                                        ? meta?.type === 'cash_flow'
+                                                                                            ? (summary?.change_amount ?? 0)
+                                                                                            : (summary?.primary_value ?? 0)
+                                                                                        : innerDonutData.reduce((s, d) => s + d.value, 0), userCurrency, locale)) })] })] }), _jsxs("div", { className: "flex flex-col items-center gap-1 px-3 mt-1 w-full", children: [_jsx("div", { className: "flex flex-wrap justify-center gap-x-3 gap-y-1", children: innerDonutData.map((d, i) => (_jsxs("div", { className: "flex items-center gap-1.5", children: [_jsx("div", { className: "w-2 h-2 rounded-full shrink-0", style: { backgroundColor: d.color } }), _jsx("span", { className: "text-[11px] text-muted-foreground whitespace-nowrap", children: d.name.length > 30 ? d.name.slice(0, 27) + '…' : d.name })] }, `${i}-${d.name}`))) }), hasOuter && (() => {
+                                                                        const visible = outerDonutData.slice(0, 6);
+                                                                        const hiddenCount = compositionDetail.length - visible.length;
+                                                                        return (_jsxs("div", { className: "flex flex-wrap justify-center gap-x-3 gap-y-1 items-center", children: [visible.map((d, i) => (_jsxs("div", { className: "flex items-center gap-1.5", children: [_jsx("div", { className: "w-2 h-2 rounded-full shrink-0", style: { backgroundColor: d.color } }), _jsx("span", { className: "text-[11px] text-muted-foreground whitespace-nowrap", children: d.name.length > 30 ? d.name.slice(0, 27) + '…' : d.name })] }, `${i}-${d.name}`))), hiddenCount > 0 && (_jsxs(Popover, { children: [_jsx(PopoverTrigger, { asChild: true, children: _jsxs("button", { type: "button", className: "text-[11px] font-semibold text-primary hover:text-primary/80 transition-colors", children: ["+", hiddenCount, " more"] }) }), _jsxs(PopoverContent, { align: "center", side: "top", sideOffset: 8, className: "w-64 p-3", children: [_jsx("p", { className: "text-xs font-semibold text-foreground mb-2", children: t('reports.composition') }), _jsx("div", { className: "flex flex-col gap-1.5 max-h-72 overflow-y-auto pr-2", children: compositionDetail.map((d, i) => {
+                                                                                                        const pct = donutTotal > 0 ? ((d.value / donutTotal) * 100).toFixed(1) : '0';
+                                                                                                        return (_jsxs("div", { className: "flex items-center gap-2", children: [_jsx("div", { className: "w-2 h-2 rounded-full shrink-0", style: { backgroundColor: d.color } }), _jsx("span", { className: "text-[11px] text-muted-foreground flex-1 truncate", children: d.name.length > 25 ? d.name.slice(0, 22) + '…' : d.name }), _jsx("span", { className: "text-xs text-muted-foreground shrink-0", children: privacyMode ? MASK : `${formatCurrency(d.value, userCurrency, locale)} (${pct}%)` })] }, `${i}-${d.name}`));
+                                                                                                    }) })] })] }))] }));
+                                                                    })()] }, compositionView)] }));
+                                                })()) : (_jsx("p", { className: "text-muted-foreground text-sm text-center py-16", children: t('reports.noData') })) })] }), _jsxs("div", { className: `lg:col-span-2 rounded-xl border shadow-sm transition-colors ${selectedDate && meta?.type !== 'income_expenses' ? 'bg-primary/5 border-primary/50' : 'bg-card border-border'}`, children: [_jsxs("div", { className: "px-5 pt-5 pb-2 flex items-center justify-between", children: [_jsxs("div", { className: "flex items-center gap-2", children: [_jsx("p", { className: "text-sm font-semibold text-foreground", children: meta?.type === 'income_expenses'
+                                                                    ? t('reports.categoryTrends')
+                                                                    : meta?.type === 'cash_flow'
+                                                                        ? t('reports.inflowOutflow')
+                                                                        : t('reports.evolution') }), selectedDate && (_jsxs("button", { type: "button", onClick: () => setSelectedDate(null), className: "flex items-center gap-1 rounded-full bg-primary/10 border border-primary/30 px-2 py-0.5 text-[11px] font-semibold text-primary transition-colors hover:bg-primary/20 whitespace-nowrap", children: [selectedDate, _jsx(X, { className: "h-3 w-3" })] }))] }), meta?.type === 'income_expenses' && (() => {
+                                                        const groupKey = sparklineView === 'byIncome' ? 'income' : 'expenses';
+                                                        const allItems = (data?.category_trend ?? []).filter((c) => c.group === groupKey);
+                                                        const totalPages = Math.ceil(allItems.length / 6);
+                                                        const hasPagination = totalPages > 1;
+                                                        return (_jsxs("div", { className: "flex items-center gap-2", children: [hasPagination && (_jsxs("div", { className: "flex items-center gap-0.5", children: [_jsx("button", { onClick: () => setSparklinePage((p) => Math.max(0, p - 1)), disabled: sparklinePage === 0, "aria-label": t('common.previous'), className: "p-1 rounded text-muted-foreground hover:text-foreground disabled:opacity-30 disabled:cursor-not-allowed transition-colors", children: _jsx("svg", { width: "14", height: "14", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round", children: _jsx("polyline", { points: "15 18 9 12 15 6" }) }) }), _jsx("button", { onClick: () => setSparklinePage((p) => Math.min(totalPages - 1, p + 1)), disabled: sparklinePage >= totalPages - 1, "aria-label": t('common.next'), className: "p-1 rounded text-muted-foreground hover:text-foreground disabled:opacity-30 disabled:cursor-not-allowed transition-colors", children: _jsx("svg", { width: "14", height: "14", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round", children: _jsx("polyline", { points: "9 18 15 12 9 6" }) }) })] })), _jsx("div", { className: "flex items-center rounded-lg border border-border bg-muted/30 overflow-hidden", children: ['byExpenses', 'byIncome'].map((opt) => (_jsx("button", { onClick: () => { setSparklineView(opt); setSparklinePage(0); }, className: `px-2.5 py-1 text-[11px] font-semibold transition-colors ${sparklineView === opt
+                                                                            ? 'bg-primary text-primary-foreground'
+                                                                            : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'}`, children: t(`reports.${opt}`) }, opt))) })] }));
+                                                    })()] }), meta?.type === 'income_expenses' ? (_jsx("div", { className: "pb-4 overflow-hidden", children: isLoading ? (_jsx("div", { className: "grid grid-cols-2 sm:grid-cols-3 gap-3 px-4", children: Array.from({ length: 6 }).map((_, i) => (_jsx(Skeleton, { className: "h-20 w-full" }, i))) })) : (() => {
+                                                    const groupKey = sparklineView === 'byIncome' ? 'income' : 'expenses';
+                                                    const allGroupItems = (data?.category_trend ?? []).filter((c) => c.group === groupKey);
+                                                    if (allGroupItems.length === 0) {
+                                                        return (_jsx("p", { className: "text-muted-foreground text-sm text-center py-16", children: t('reports.noData') }));
+                                                    }
+                                                    const totalPages = Math.ceil(allGroupItems.length / 6);
+                                                    const pages = Array.from({ length: totalPages }, (_, i) => allGroupItems.slice(i * 6, i * 6 + 6));
+                                                    return (_jsx("div", { className: "flex", style: {
+                                                            transform: `translateX(-${sparklinePage * 100}%)`,
+                                                            transition: 'transform 300ms cubic-bezier(0.4, 0, 0.2, 1)',
+                                                        }, children: pages.map((pageItems, pageIdx) => (_jsx("div", { className: "grid grid-cols-2 sm:grid-cols-3 gap-3 w-full shrink-0 px-4", children: pageItems.map((item) => {
+                                                                const sparkData = item.series.map((s) => ({ date: s.date, v: s.value }));
+                                                                const gradId = `grad-${item.key}-${item.group}-p${pageIdx}`;
+                                                                return (_jsxs("div", { className: "rounded-lg border border-border/50 bg-muted/20 px-3 py-2", children: [_jsxs("div", { className: "flex items-center gap-1.5 mb-0.5", children: [_jsx("div", { className: "w-2 h-2 rounded-full shrink-0", style: { backgroundColor: item.color } }), _jsx("span", { className: "text-[11px] text-muted-foreground truncate", children: item.key === 'uncategorized' ? t('reports.uncategorized') : item.key === 'other' ? t('reports.other') : item.label })] }), _jsx("p", { className: "text-xs font-bold tabular-nums text-foreground mb-1", children: mask(formatCompact(item.total, userCurrency, locale)) }), _jsx("div", { style: { height: 48 }, children: _jsx(ResponsiveContainer, { width: "100%", height: "100%", children: _jsxs(AreaChart, { data: sparkData, margin: { top: 2, right: 0, left: 0, bottom: 0 }, children: [_jsx("defs", { children: _jsxs("linearGradient", { id: gradId, x1: "0", y1: "0", x2: "0", y2: "1", children: [_jsx("stop", { offset: "5%", stopColor: item.color, stopOpacity: 0.3 }), _jsx("stop", { offset: "95%", stopColor: item.color, stopOpacity: 0.02 })] }) }), _jsx(XAxis, { dataKey: "date", hide: true }), _jsx(Tooltip, { formatter: (value) => [
+                                                                                                privacyMode ? MASK : formatCurrency(value ?? 0, userCurrency, locale),
+                                                                                                item.label,
+                                                                                            ], labelFormatter: (label) => label, contentStyle: { ...tooltipStyle, padding: '4px 8px' } }), _jsx(Area, { type: "monotone", dataKey: "v", stroke: item.color, strokeWidth: 1.5, fill: `url(#${gradId})`, dot: false, activeDot: { r: 2, fill: item.color } })] }) }) })] }, `${item.key}-${item.group}`));
+                                                            }) }, pageIdx))) }));
+                                                })() })) : (_jsx("div", { className: "px-1 pb-4", style: { height: 280 }, children: isLoading ? (_jsx("div", { className: "px-4", children: _jsx(Skeleton, { className: "h-full w-full" }) })) : chartData.length > 0 && meta ? (_jsx(ResponsiveContainer, { width: "100%", height: "100%", children: _jsxs(ComposedChart, { data: chartData, margin: { top: 8, right: 16, left: 0, bottom: 0 }, stackOffset: "sign", onClick: (payload) => {
+                                                            const date = payload?.activeLabel;
+                                                            if (!date)
+                                                                return;
+                                                            setSelectedDate((prev) => (prev === date ? null : date));
+                                                        }, style: { cursor: 'pointer' }, children: [_jsx(XAxis, { dataKey: "date", tick: { fontSize: 10, fill: 'var(--muted-foreground)' }, axisLine: false, tickLine: false, interval: "preserveStartEnd" }), _jsx(YAxis, { tickFormatter: (v) => {
+                                                                    if (privacyMode)
+                                                                        return '';
+                                                                    if (v === 0)
+                                                                        return '0';
+                                                                    return formatCompact(v, userCurrency, locale);
+                                                                }, tick: { fontSize: 10, fill: 'var(--muted-foreground)' }, axisLine: false, tickLine: false, width: 64, tickCount: 5 }), _jsx(ReferenceLine, { y: 0, stroke: "var(--border)", strokeWidth: 1 }), _jsx(Tooltip, { content: ({ active, payload, label }) => {
+                                                                    if (!active || !payload)
+                                                                        return null;
+                                                                    const items = payload.filter((p) => p.value !== null && p.value !== undefined && p.value !== 0);
+                                                                    if (items.length === 0)
+                                                                        return null;
+                                                                    return (_jsxs("div", { style: tooltipStyle, className: "px-3 py-2", children: [_jsx("p", { className: "text-xs font-medium mb-1", children: label }), items.map((p) => (_jsxs("p", { className: "text-xs", style: { color: p.color }, children: [t(`reports.${p.dataKey}`, { defaultValue: p.name }), ":", ' ', privacyMode ? MASK : formatCurrency(p.value, userCurrency, locale)] }, p.dataKey)))] }));
+                                                                } }), _jsx(Legend, { iconType: "circle", iconSize: 8, wrapperStyle: { fontSize: '12px', paddingTop: '8px' }, formatter: (value) => t(`reports.${value}`, { defaultValue: value }) }), (() => {
+                                                                const isNetWorth = meta.type === 'net_worth';
+                                                                const allSeries = meta.type === 'cash_flow'
+                                                                    ? [
+                                                                        { key: 'inflow', color: '#10B981' },
+                                                                        { key: 'outflow', color: '#F43F5E' },
+                                                                    ]
+                                                                    : meta.series_keys.map((k) => ({ key: k, color: colorMap[k] || '#6366F1' }));
+                                                                const filteredSeries = allSeries.filter(({ key }) => chartData.some((d) => { const v = d[key]; return typeof v === 'number' && v !== 0; }));
+                                                                const positiveKeys = isNetWorth ? filteredSeries.filter(({ key }) => !NEGATIVE_SERIES.has(key)) : filteredSeries;
+                                                                const negativeKeys = isNetWorth ? filteredSeries.filter(({ key }) => NEGATIVE_SERIES.has(key)) : [];
+                                                                const lastPositiveKey = positiveKeys.at(-1)?.key ?? null;
+                                                                const lastNegativeKey = negativeKeys.at(-1)?.key ?? null;
+                                                                return filteredSeries.map(({ key, color }) => {
+                                                                    let radius = [0, 0, 0, 0];
+                                                                    if (isNetWorth && NEGATIVE_SERIES.has(key) && key === lastNegativeKey) {
+                                                                        radius = [4, 4, 0, 0];
+                                                                    }
+                                                                    else if (key === lastPositiveKey) {
+                                                                        radius = [4, 4, 0, 0];
+                                                                    }
+                                                                    return (_jsx(Bar, { dataKey: key, stackId: "stack", fill: color, radius: radius, maxBarSize: 32, children: selectedDate && chartData.map((d) => (_jsx(Cell, { fill: color, fillOpacity: d.date === selectedDate ? 1 : 0.4 }, d.date))) }, key));
+                                                                });
+                                                            })(), meta.type === 'net_worth' && (_jsx(Line, { type: "monotone", dataKey: "value", name: t('reports.netWorth', { defaultValue: 'Net Worth' }), stroke: "#10B981", strokeWidth: 2, strokeDasharray: "6 3", dot: false, activeDot: { r: 4, fill: '#10B981' }, isAnimationActive: false }))] }) })) : (_jsx("p", { className: "text-muted-foreground text-sm text-center py-16", children: t('reports.noData') })) }))] })] })] }))] }))] }));
+}

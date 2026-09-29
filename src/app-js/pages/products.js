@@ -1,0 +1,217 @@
+import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
+import { useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { useNavigate } from 'react-router-dom';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Archive, ArchiveRestore, ArrowLeft, Package, Pencil, Plus, Trash2 } from 'lucide-react';
+import { toast } from 'sonner';
+import { Button } from '../components/ui/button.js';
+import { Input } from '../components/ui/input.js';
+import { Label } from '../components/ui/label.js';
+import { Skeleton } from '../components/ui/skeleton.js';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, } from '../components/ui/dialog.js';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue, } from '../components/ui/select.js';
+import { PageHeader } from '../components/page-header.js';
+import { IconAction, SectionCard, Segmented, TH } from '../components/invoice-ui.js';
+import { CurrencySelect } from '../components/currency-select.js';
+import { cn } from '../lib/utils.js';
+import { formatCurrency } from '../lib/format.js';
+import { useDisplayLocale } from '../hooks/use-display-locale.js';
+import { usePrivacyMode } from '../hooks/use-privacy-mode.js';
+import { useAuth } from '../contexts/auth-context.js';
+import { useWorkspace } from '../contexts/workspace-context.js';
+import { fiscal as fiscalApi, invoices as invoicesApi, products as productsApi } from '../lib/api.js';
+import { invoiceErrorKey } from '../lib/invoice-utils.js';
+import { FREQUENCIES } from '../lib/invoice-schedule-utils.js';
+import { productActions } from '../lib/product-utils.js';
+export default function ProductsPage() {
+    const { t } = useTranslation();
+    const navigate = useNavigate();
+    const locale = useDisplayLocale();
+    const { mask } = usePrivacyMode();
+    const { canWrite } = useWorkspace();
+    const queryClient = useQueryClient();
+    const [filter, setFilter] = useState('active');
+    const [search, setSearch] = useState('');
+    const [editing, setEditing] = useState(null);
+    const { data: list, isLoading } = useQuery({
+        queryKey: ['products', filter],
+        queryFn: () => productsApi.list({ active: filter === 'active' }),
+    });
+    const visible = useMemo(() => {
+        if (!list)
+            return [];
+        const q = search.trim().toLowerCase();
+        if (!q)
+            return list;
+        return list.filter((p) => p.name.toLowerCase().includes(q) || (p.description ?? '').toLowerCase().includes(q));
+    }, [list, search]);
+    const refresh = () => {
+        void queryClient.invalidateQueries({ queryKey: ['products'] });
+    };
+    const onError = (error) => {
+        const key = invoiceErrorKey(error);
+        toast.error(key ? t(key, t('invoices.errors.generic')) : t('invoices.errors.generic'));
+    };
+    const archiveMutation = useMutation({
+        mutationFn: ({ id, active }) => productsApi.update(id, { active }),
+        onSuccess: (_, { active }) => {
+            toast.success(active ? t('invoices.products.restored') : t('invoices.products.archived'));
+            refresh();
+        },
+        onError,
+    });
+    const deleteMutation = useMutation({
+        mutationFn: (id) => productsApi.remove(id),
+        onSuccess: () => {
+            toast.success(t('invoices.products.deleted'));
+            refresh();
+        },
+        onError,
+    });
+    const money = (value, code) => mask(formatCurrency(Number(value), code, locale));
+    const priceLabel = (product) => {
+        const live = product.prices.filter((p) => p.active);
+        if (live.length === 0)
+            return t('invoices.products.noPrice');
+        return live
+            .map((p) => money(p.unit_price, p.currency) +
+            (p.interval ? ` / ${t(`invoices.products.per.${p.interval}`)}` : ''))
+            .join(' · ');
+    };
+    return (_jsxs("div", { children: [_jsxs("button", { onClick: () => navigate('/invoices'), className: "inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors mb-3", "data-testid": "products-back", children: [_jsx(ArrowLeft, { className: "h-3.5 w-3.5" }), t('invoices.backToList')] }), _jsx(PageHeader, { section: t('invoices.title'), title: t('invoices.products.title'), action: canWrite ? (_jsxs(Button, { size: "sm", onClick: () => setEditing('new'), "data-testid": "product-new-button", children: [_jsx(Plus, { className: "h-4 w-4 mr-1.5" }), t('invoices.products.new')] })) : undefined }), _jsxs("div", { className: "mb-4 flex flex-wrap items-center justify-between gap-3", children: [_jsx(Segmented, { value: filter, onChange: setFilter, testIdPrefix: "product-filter", options: ['active', 'archived'].map((value) => ({
+                            value,
+                            label: t(`invoices.products.filter.${value}`),
+                        })) }), _jsx(Input, { value: search, onChange: (e) => setSearch(e.target.value), placeholder: t('invoices.products.searchPlaceholder'), className: "h-9 w-full sm:w-64", "data-testid": "product-search" })] }), _jsx(SectionCard, { children: isLoading ? (_jsx("div", { className: "p-5 space-y-3", children: [0, 1, 2].map((i) => (_jsx(Skeleton, { className: "h-9 w-full" }, i))) })) : visible.length === 0 ? (_jsxs("div", { className: "px-5 py-14 text-center", "data-testid": "products-empty", children: [_jsx(Package, { className: "h-8 w-8 mx-auto text-muted-foreground/50" }), _jsx("p", { className: "mt-3 text-sm text-muted-foreground max-w-sm mx-auto", children: search
+                                ? t('invoices.products.noneFound')
+                                : filter === 'archived'
+                                    ? t('invoices.products.emptyArchived')
+                                    : t('invoices.products.empty') }), !search && filter === 'active' && canWrite && (_jsxs(Button, { size: "sm", className: "mt-4", onClick: () => setEditing('new'), children: [_jsx(Plus, { className: "h-4 w-4 mr-1.5" }), t('invoices.products.new')] }))] })) : (_jsx("div", { className: "overflow-x-auto", children: _jsxs("table", { className: "w-full", children: [_jsx("thead", { children: _jsxs("tr", { className: "border-b border-border", children: [_jsx("th", { className: `${TH} pl-4 sm:pl-5 text-left`, children: t('invoices.products.column.name') }), _jsx("th", { className: `${TH} text-left w-24 hidden sm:table-cell`, children: t('invoices.products.column.kind') }), _jsx("th", { className: `${TH} text-left hidden md:table-cell`, children: t('invoices.products.column.prices') }), _jsx("th", { className: `${TH} text-right w-24 hidden lg:table-cell`, children: t('invoices.products.column.invoices') }), canWrite && (_jsx("th", { className: `${TH} pr-4 sm:pr-5 w-28`, children: _jsx("span", { className: "sr-only", children: t('invoices.moreActions') }) }))] }) }), _jsx("tbody", { children: visible.map((product) => {
+                                    const actions = productActions(product);
+                                    return (_jsxs("tr", { "data-testid": "product-row", className: "border-b border-border last:border-0", children: [_jsxs("td", { className: "py-3 pl-4 sm:pl-5", children: [_jsx("div", { className: "text-sm font-medium text-foreground truncate", children: product.name }), _jsx("div", { className: "text-xs text-muted-foreground truncate", children: product.description ?? (product.unit ? t('invoices.products.perUnit', { unit: product.unit }) : '') })] }), _jsx("td", { className: "py-3 hidden sm:table-cell text-xs text-muted-foreground", children: t(`invoices.products.kind.${product.kind}`) }), _jsx("td", { className: "py-3 hidden md:table-cell text-xs text-muted-foreground tabular-nums", children: priceLabel(product) }), _jsx("td", { className: "py-3 text-right hidden lg:table-cell text-xs text-muted-foreground tabular-nums", children: product.invoice_count }), canWrite && (_jsx("td", { className: "py-3 pr-4 sm:pr-5", children: _jsxs("div", { className: "flex justify-end gap-1", children: [_jsx(IconAction, { onClick: () => setEditing(product), label: t('common.edit'), children: _jsx(Pencil, { className: "h-3.5 w-3.5" }) }), actions.canArchive && (_jsx(IconAction, { onClick: () => archiveMutation.mutate({ id: product.id, active: false }), label: t('invoices.products.action.archive'), children: _jsx(Archive, { className: "h-3.5 w-3.5" }) })), actions.canRestore && (_jsx(IconAction, { onClick: () => archiveMutation.mutate({ id: product.id, active: true }), label: t('invoices.products.action.restore'), children: _jsx(ArchiveRestore, { className: "h-3.5 w-3.5" }) })), actions.canDelete && (_jsx(IconAction, { onClick: () => deleteMutation.mutate(product.id), label: t('common.delete'), children: _jsx(Trash2, { className: "h-3.5 w-3.5" }) }))] }) }))] }, product.id));
+                                }) })] }) })) }), _jsx(ProductDialog, { open: editing !== null, onOpenChange: (open) => !open && setEditing(null), product: editing === 'new' ? null : editing, onSaved: refresh }, editing === null ? 'closed' : editing === 'new' ? 'new' : editing.id)] }));
+}
+function blankPrice(currency) {
+    return { id: null, currency, unit_price: '', tax_rate: '', billing: 'one_time', interval: '', nickname: '', active: true };
+}
+function toPayload(row) {
+    return {
+        currency: row.currency,
+        unit_price: row.unit_price,
+        tax_rate: row.tax_rate || null,
+        billing: row.billing,
+        interval: row.billing === 'recurring' && row.interval ? row.interval : null,
+        nickname: row.nickname || null,
+    };
+}
+export function ProductDialog({ open, onOpenChange, product, onSaved, }) {
+    const { t } = useTranslation();
+    const { user } = useAuth();
+    const { data: settings } = useQuery({
+        queryKey: ['invoice-settings'],
+        queryFn: invoicesApi.settings,
+        enabled: open,
+    });
+    const showTax = (settings?.tax_fields ?? 'hidden') !== 'hidden';
+    const defaultCurrency = user?.preferences?.currency_display ?? 'USD';
+    // What this workspace's jurisdiction asks for on a catalog item. A
+    // suggestion: the keys below are offered, and any other key can be
+    // added by hand, so a Brazilian studio selling to Berlin can carry an
+    // HS code beside its NCM.
+    const { data: suggested } = useQuery({
+        queryKey: ['fiscal', 'product-fields'],
+        queryFn: fiscalApi.productFields,
+        enabled: open,
+    });
+    const [name, setName] = useState(product?.name ?? '');
+    const [kind, setKind] = useState(product?.kind ?? 'service');
+    const [unit, setUnit] = useState(product?.unit ?? '');
+    const [description, setDescription] = useState(product?.description ?? '');
+    const [refs, setRefs] = useState(() => Object.entries(product?.fiscal_refs ?? {}).map(([key, value]) => ({ key, value })));
+    const [customKey, setCustomKey] = useState('');
+    const [prices, setPrices] = useState(product
+        ? product.prices.map((p) => ({
+            id: p.id,
+            currency: p.currency,
+            unit_price: p.unit_price,
+            tax_rate: p.tax_rate ?? '',
+            billing: p.billing,
+            interval: p.interval ?? '',
+            nickname: p.nickname ?? '',
+            active: p.active,
+        }))
+        : [blankPrice(defaultCurrency)]);
+    const updatePrice = (index, patch) => setPrices(prices.map((row, i) => (i === index ? { ...row, ...patch } : row)));
+    const onError = (error) => {
+        const key = invoiceErrorKey(error);
+        toast.error(key ? t(key, t('invoices.errors.generic')) : t('invoices.errors.generic'));
+    };
+    const mutation = useMutation({
+        mutationFn: async () => {
+            const filled = prices.filter((row) => row.unit_price !== '');
+            const fiscal_refs = Object.fromEntries(refs.filter((r) => r.key.trim() && r.value.trim()).map((r) => [r.key.trim().toLowerCase(), r.value.trim()]));
+            const base = {
+                name,
+                kind,
+                unit: unit || null,
+                description: description || null,
+                fiscal_refs: Object.keys(fiscal_refs).length ? fiscal_refs : null,
+            };
+            if (!product) {
+                return productsApi.create({ ...base, prices: filled.map(toPayload) });
+            }
+            // Product fields, then each price by what happened to it: new rows
+            // are added, existing rows updated. Nothing is deleted from here:
+            // an existing price the person no longer wants is archived, which
+            // is the only outcome the server allows once an invoice was billed
+            // at it, and the same outcome either way keeps the dialog honest.
+            let saved = await productsApi.update(product.id, base);
+            for (const row of prices) {
+                if (row.id) {
+                    // A cleared amount on an existing price is not a change to it.
+                    const patch = row.unit_price === '' ? {} : toPayload(row);
+                    saved = await productsApi.updatePrice(product.id, row.id, { ...patch, active: row.active });
+                }
+                else if (row.unit_price !== '') {
+                    saved = await productsApi.addPrice(product.id, toPayload(row));
+                }
+            }
+            return saved;
+        },
+        onSuccess: () => {
+            toast.success(product ? t('invoices.products.saved') : t('invoices.products.created'));
+            onOpenChange(false);
+            onSaved();
+        },
+        onError: (error) => {
+            onError(error);
+            // The edit path is several requests, and the ones before the
+            // failure have committed. Closing on the server's state means a
+            // retry starts from what is really there, instead of adding the
+            // same new price twice.
+            if (product) {
+                onSaved();
+                onOpenChange(false);
+            }
+        },
+    });
+    const ready = name.trim().length > 0 && prices.every((row) => row.billing !== 'recurring' || row.interval !== '' || row.unit_price === '');
+    return (_jsx(Dialog, { open: open, onOpenChange: onOpenChange, children: _jsxs(DialogContent, { className: "flex flex-col max-h-[calc(100dvh-2rem)] sm:max-w-2xl", children: [_jsxs(DialogHeader, { children: [_jsx(DialogTitle, { children: product ? t('invoices.products.editTitle') : t('invoices.products.new') }), _jsx(DialogDescription, { children: t('invoices.products.newDescription') })] }), _jsxs("div", { className: "space-y-4", children: [_jsxs("div", { className: "grid grid-cols-1 sm:grid-cols-[1fr_9rem_6rem] gap-3", children: [_jsxs("div", { className: "space-y-1.5", children: [_jsx(Label, { htmlFor: "product-name", children: t('invoices.products.field.name') }), _jsx(Input, { id: "product-name", "data-testid": "product-name-input", value: name, onChange: (e) => setName(e.target.value), placeholder: t('invoices.products.field.namePlaceholder') })] }), _jsxs("div", { className: "space-y-1.5", children: [_jsx(Label, { children: t('invoices.products.field.kind') }), _jsxs(Select, { value: kind, onValueChange: (v) => setKind(v), children: [_jsx(SelectTrigger, { "data-testid": "product-kind-select", children: _jsx(SelectValue, {}) }), _jsx(SelectContent, { children: ['service', 'product'].map((value) => (_jsx(SelectItem, { value: value, children: t(`invoices.products.kind.${value}`) }, value))) })] })] }), _jsxs("div", { className: "space-y-1.5", children: [_jsx(Label, { htmlFor: "product-unit", children: t('invoices.field.unit') }), _jsx(Input, { id: "product-unit", "data-testid": "product-unit-input", value: unit, onChange: (e) => setUnit(e.target.value), placeholder: t('invoices.field.unitPlaceholder'), maxLength: 20 })] })] }), _jsxs("div", { className: "space-y-1.5", children: [_jsx(Label, { htmlFor: "product-description", children: t('invoices.products.field.description') }), _jsx(Input, { id: "product-description", "data-testid": "product-description-input", value: description, onChange: (e) => setDescription(e.target.value) })] }), (() => {
+                            const offered = (suggested?.fields ?? []).filter((f) => f.kinds.length === 0 || f.kinds.includes(kind));
+                            const offeredKeys = new Set(offered.map((f) => f.key));
+                            const extra = refs.filter((r) => !offeredKeys.has(r.key));
+                            const valueOf = (key) => refs.find((r) => r.key === key)?.value ?? '';
+                            const setRef = (key, value) => setRefs((prev) => prev.some((r) => r.key === key)
+                                ? prev.map((r) => (r.key === key ? { ...r, value } : r))
+                                : [...prev, { key, value }]);
+                            const anyField = offered.length > 0 || extra.length > 0;
+                            return (_jsxs("div", { className: "space-y-2", "data-testid": "product-fiscal-refs", children: [_jsx(Label, { children: t('invoices.products.field.fiscalRefs') }), _jsx("p", { className: "text-[11px] text-muted-foreground", children: anyField
+                                            ? t('invoices.products.field.fiscalRefsHint')
+                                            : t('invoices.products.field.fiscalRefsNone') }), _jsxs("div", { className: cn('grid grid-cols-2 sm:grid-cols-3 gap-3', !anyField && 'hidden'), children: [offered.map((f) => (_jsxs("div", { className: "space-y-1.5", children: [_jsx(Label, { htmlFor: `ref-${f.key}`, className: "text-xs", children: t(f.label_key, f.key) }), _jsx(Input, { id: `ref-${f.key}`, "data-testid": `product-ref-${f.key}`, className: "h-9", value: valueOf(f.key), onChange: (e) => setRef(f.key, e.target.value), maxLength: 100 })] }, f.key))), extra.map((r) => (_jsxs("div", { className: "space-y-1.5", children: [_jsx(Label, { htmlFor: `ref-${r.key}`, className: "text-xs", children: t(`fiscal.productField.${r.key}`, r.key) }), _jsx(Input, { id: `ref-${r.key}`, "data-testid": `product-ref-${r.key}`, className: "h-9", value: r.value, onChange: (e) => setRef(r.key, e.target.value), maxLength: 100 })] }, r.key)))] }), _jsxs("div", { className: "flex items-center gap-2", children: [_jsx(Input, { className: "h-8 w-48", placeholder: t('invoices.products.field.customRefKey'), value: customKey, onChange: (e) => setCustomKey(e.target.value), "data-testid": "product-ref-custom-key", maxLength: 40 }), _jsxs(Button, { size: "sm", variant: "ghost", disabled: !/^[a-z][a-z0-9_]*$/.test(customKey.trim().toLowerCase()) || refs.some((r) => r.key === customKey.trim().toLowerCase()), onClick: () => {
+                                                    setRef(customKey.trim().toLowerCase(), '');
+                                                    setCustomKey('');
+                                                }, "data-testid": "product-ref-add", children: [_jsx(Plus, { className: "h-3.5 w-3.5 mr-1" }), t('invoices.products.field.addRef')] })] })] }));
+                        })(), _jsxs("div", { className: "space-y-2", children: [_jsxs("div", { className: "flex items-center justify-between", children: [_jsx(Label, { children: t('invoices.products.field.prices') }), _jsxs(Button, { size: "sm", variant: "ghost", onClick: () => setPrices([...prices, blankPrice(defaultCurrency)]), "data-testid": "product-add-price", children: [_jsx(Plus, { className: "h-3.5 w-3.5 mr-1" }), t('invoices.products.field.addPrice')] })] }), _jsx("p", { className: "text-[11px] text-muted-foreground", children: t('invoices.products.field.pricesHint') }), _jsxs("div", { className: "rounded-lg border border-border divide-y divide-border", children: [prices.map((row, index) => (_jsxs("div", { className: cn('grid grid-cols-2 sm:grid-cols-[7rem_1fr_9rem_8rem_2rem] gap-2 px-3 py-2.5 items-center', !row.active && 'opacity-60'), "data-testid": "product-price-row", children: [_jsx(CurrencySelect, { id: `price-currency-${index}`, value: row.currency, onChange: (code) => updatePrice(index, { currency: code }) }), _jsx(Input, { className: "h-9 text-right", inputMode: "decimal", placeholder: "0.00", value: row.unit_price, onChange: (e) => updatePrice(index, { unit_price: e.target.value }), "data-testid": `price-amount-${index}`, "aria-label": t('invoices.field.unitPrice') }), _jsxs(Select, { value: row.billing === 'recurring' ? row.interval || 'recurring' : 'one_time', onValueChange: (v) => v === 'one_time'
+                                                        ? updatePrice(index, { billing: 'one_time', interval: '' })
+                                                        : updatePrice(index, { billing: 'recurring', interval: v === 'recurring' ? '' : v }), children: [_jsx(SelectTrigger, { "data-testid": `price-billing-${index}`, children: _jsx(SelectValue, {}) }), _jsxs(SelectContent, { children: [_jsx(SelectItem, { value: "one_time", children: t('invoices.products.billing.one_time') }), FREQUENCIES.map((f) => (_jsx(SelectItem, { value: f, children: t('invoices.products.billing.every', { interval: t(`invoices.products.per.${f}`) }) }, f)))] })] }), _jsx(Input, { className: "h-9", placeholder: t('invoices.products.field.nickname'), value: row.nickname, onChange: (e) => updatePrice(index, { nickname: e.target.value }), "data-testid": `price-nickname-${index}`, maxLength: 100 }), row.id ? (_jsx(Button, { size: "sm", variant: "ghost", className: "h-8 w-8 p-0 text-muted-foreground hover:text-foreground", onClick: () => updatePrice(index, { active: !row.active }), "data-testid": `price-${row.active ? 'archive' : 'restore'}-${index}`, "aria-label": row.active ? t('invoices.products.action.archive') : t('invoices.products.action.restore'), children: row.active ? _jsx(Archive, { className: "h-4 w-4" }) : _jsx(ArchiveRestore, { className: "h-4 w-4" }) })) : (_jsx(Button, { size: "sm", variant: "ghost", className: "h-8 w-8 p-0 text-muted-foreground hover:text-destructive", onClick: () => setPrices(prices.filter((_, i) => i !== index)), "data-testid": `price-remove-${index}`, "aria-label": t('common.delete'), children: _jsx(Trash2, { className: "h-4 w-4" }) })), showTax && (_jsxs("div", { className: "col-span-2 sm:col-span-5 flex items-center gap-2", children: [_jsx("span", { className: "text-[11px] text-muted-foreground", children: t('invoices.field.taxRate') }), _jsx(Input, { className: "h-8 w-20 text-right", inputMode: "decimal", placeholder: "%", value: row.tax_rate, onChange: (e) => updatePrice(index, { tax_rate: e.target.value }), "data-testid": `price-tax-${index}` })] }))] }, row.id ?? `new-${index}`))), prices.length === 0 && (_jsx("p", { className: "px-3 py-3 text-xs text-muted-foreground", children: t('invoices.products.field.noPrices') }))] })] })] }), _jsxs(DialogFooter, { className: "gap-2", children: [_jsx(Button, { variant: "ghost", onClick: () => onOpenChange(false), children: t('common.cancel') }), _jsx(Button, { onClick: () => mutation.mutate(), disabled: !ready || mutation.isPending, "data-testid": "product-save", children: product ? t('common.save') : t('common.create') })] })] }) }));
+}
